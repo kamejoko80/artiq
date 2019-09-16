@@ -95,6 +95,12 @@ def peripheral_grabber(module, peripheral):
     eem.Grabber.add_std(module, port, port_aux, port_aux2)
 
 
+def peripheral_fastino(module, peripheral):
+    if len(peripheral["ports"]) != 1:
+        raise ValueError("wrong number of ports")
+    eem.Fastino.add_std(module, peripheral["ports"][0])
+
+
 def add_peripherals(module, peripherals):
     peripheral_processors = {
         "dio": peripheral_dio,
@@ -104,6 +110,7 @@ def add_peripherals(module, peripherals):
         "suservo": peripheral_suservo,
         "zotino": peripheral_zotino,
         "grabber": peripheral_grabber,
+        "fastino": peripheral_fastino,
     }
     for peripheral in peripherals:
         peripheral_processors[peripheral["type"]](module, peripheral)
