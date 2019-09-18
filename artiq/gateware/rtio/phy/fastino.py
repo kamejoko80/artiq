@@ -31,7 +31,7 @@ class SerDes(Module):
         self.dat_r = Signal(n_frame//2*(1 << len(adr)))
 
         self.submodules.crc = LiteEthMACCRCEngine(
-            data_width=4*n_lanes, width=n_checksum, polynom=0x180f)  # crc-12 telco
+            data_width=2*n_lanes, width=n_checksum, polynom=0x80f)  # crc-12 telco
         checksum = Signal(n_checksum)
 
         body_ = Cat(self.cfg, adr, self.mask, self.dac)
