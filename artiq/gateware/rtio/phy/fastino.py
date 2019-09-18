@@ -10,13 +10,8 @@ class SerDes(Module):
     def transpose(self, i, n):
         # i is n,m c-contiguous
         # o is m,n c-contiguous
-        o = Signal.like(i)
         m = len(i)//n
         assert n*m == len(i)
-        for nn in range(n):
-            for mm in range(m):
-                self.comb += o[mm*n + nn].eq(i[nn*m + mm])
-        return o
 
     def __init__(self, pins, pins_n):
         n_bits = 16
@@ -25,67 +20,86 @@ class SerDes(Module):
         assert n_div == 7
         n_frame = 14
         n_lanes = len(pins.mosi)
+        n_checksum = 12
+        n_word = n_lanes*n_div
+        n_body = n_word*n_frame - n_frame//2 - 1 - n_checksum
 
         self.dac = [Signal(n_bits, reset=i) for i in range(n_channels)]
         self.mask = Signal(n_channels, reset=(1 << n_channels) - 1)
-        self.cfg = Signal(16, reset=0)
+        self.cfg = Signal(20, reset=0)
         adr = Signal(4)
-        self.dat_r = Signal(n_frame*(1 << len(adr)))
+        self.dat_r = Signal(n_frame//2*(1 << len(adr)))
 
-        checksum = Signal(16)
-        crc = LiteEthMACCRCEngine(
-            data_width=2*n_lanes, width=len(checksum), polynom=0x1021)
-        self.submodules += crc
+        self.submodules.crc = LiteEthMACCRCEngine(
+            data_width=4*n_lanes, width=n_checksum, polynom=0x180f)  # crc-12 telco
+        checksum = Signal(n_checksum)
 
-        n_word = n_lanes*n_div
-        body = Signal(n_frame*n_word - n_frame//2 - 1 - len(checksum))
-        body_ = Cat(self.cfg, adr, self.dac, self.mask)
-        assert len(body) == len(body_)
+        body_ = Cat(self.cfg, adr, self.mask, self.dac)
+        assert len(body_) == n_body
+        body = Signal(n_body)
         self.comb += body.eq(body_)
 
-        words = Signal(n_frame*n_word)
         words_ = []
         j = 0
         for i in range(n_frame):
             if i == 0:
+                k = n_word - n_checksum
+            elif i == 1:
                 words_.append(C(1))
-                words_.append(checksum)
-            elif i <= n_frame//2:
+                k = n_word - 1
+            elif i < n_frame//2 + 2:
                 words_.append(C(0))
-            k = n_word - (len(Cat(words_)) % n_word)
+                k = n_word - 1
+            else:
+                k = n_word
             words_.append(body[j:j + k])
             j += k
         words_ = Cat(words_)
-        assert len(words_) == len(words)
+        assert len(words_) == n_frame*n_word - n_checksum
+        words = Signal(len(words_))
         self.comb += words.eq(words_)
 
         self.stb = Signal()
         clk = Signal(n_div, reset=0b1100011)
-        stb_clk = Signal()
-        i_frame = Signal(max=n_frame//2)
+        clk_stb = Signal()
+        i_frame = Signal(max=n_div*n_frame//2)  # DDR
+        sr = [Signal(n_frame*n_div - n_checksum//n_lanes, reset_less=True)
+                for i in range(n_lanes)]
+        assert len(Cat(sr)) == len(words)
+        ddr_data = Cat([sri[-2] for sri in sr], [sri[-1] for sri in sr])
         self.comb += [
-            stb_clk.eq(~clk[0] & clk[-1]),
-            self.stb.eq(stb_clk & (i_frame == n_frame//2 - 1)),
+            # assert one cycle ahead
+            clk_stb.eq(~clk[0] & clk[-1]),
+            # double period because of DDR
+            self.stb.eq(i_frame == n_div*n_frame//2 - 1),
+
+            self.crc.last.eq(checksum),
+            self.crc.data.eq(ddr_data),
         ]
-        sr = [Signal(n_frame*n_div, reset_less=True) for i in range(n_lanes)]
         miso = Signal()
         miso_sr = Signal(n_frame, reset_less=True)
         self.sync.rio_phy += [
             clk.eq(Cat(clk[-2:], clk)),
-            [sri[2:].eq(sri) for sri in sr],
-            If(~clk[0],
+            If(clk[:2] == 0,  # TODO: tweak sampling
                 miso_sr.eq(Cat(miso, miso_sr)),
             ),
-            If(stb_clk,
+            If(~self.stb,
                 i_frame.eq(i_frame + 1),
             ),
-            If(self.stb,
+            [sri[2:].eq(sri) for sri in sr],
+            checksum.eq(self.crc.next),
+            If(self.stb & clk_stb,
                 i_frame.eq(0),
-                Cat(sr).eq(self.transpose(words, n_frame*n_div)),
-                adr.eq(adr + 1),
-                Array([self.dat_r[i*n_frame:(i + 1)*n_frame]
+                # transpose
+                Cat(sr).eq(Cat(words[mm::n_lanes] for mm in range(n_lanes))),
+                checksum.eq(0),
+                Array([self.dat_r[i*n_frame//2:(i + 1)*n_frame//2]
                     for i in range(1 << len(adr))])[adr].eq(miso_sr),
-            )
+                adr.eq(adr + 1),
+            ),
+            If(i_frame == n_div*n_frame//2 - 2,
+                ddr_data.eq(self.crc.next),
+            ),
         ]
 
         clk_ddr = Signal()
@@ -95,7 +109,8 @@ class SerDes(Module):
                 DifferentialOutput(clk_ddr, pins.clk, pins_n.clk),
                 [(DDROutput(sri[-1], sri[-2], ddr, ClockSignal("rio_phy")),
                   DifferentialOutput(ddr, mp, mn))
-                  for sri, ddr, mp, mn in zip(sr, Signal(n_lanes), pins.mosi, pins_n.mosi)],
+                  for sri, ddr, mp, mn in zip(
+                      sr, Signal(n_lanes), pins.mosi, pins_n.mosi)],
                 DifferentialInput(pins.miso, pins_n.miso, miso0),
                 MultiReg(miso0, miso, "rio_phy"),
         ]
@@ -114,11 +129,15 @@ class Fastino(Module):
                     Array(self.serializer.dac + [
                         self.serializer.mask[:16],
                         self.serializer.mask[16:],
-                        self.serializer.cfg
+                        self.serializer.cfg[:16],
+                        self.serializer.cfg[16:],
+                        Signal()
                         ])[self.rtlink.o.address].eq(self.rtlink.o.data)
-                )
-                self.rtlink.i.stb.eq(self.rtlink.o.stb & (self.rtlink.o.address[2:5] == 0b111100)),
+                ),
+                self.rtlink.i.stb.eq(self.rtlink.o.stb &
+                    (self.rtlink.o.address[4:] == 0b11)),
                 self.rtlink.i.data.eq(Array([
-                    self.serializer.dat_r[i*16:(i + 1)*16] for i in range(4)])[
-                        self.rtlink.o.address[:2]]),
+                    self.serializer.dat_r[i*7:(i + 1)*7]
+                    for i in range(1 << 4)])[
+                        self.rtlink.o.address[:4]]),
         ]
