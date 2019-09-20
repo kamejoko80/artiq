@@ -34,6 +34,15 @@ class SerDes(Module):
             data_width=2*n_lanes, width=n_checksum, polynom=0x80f)  # crc-12 telco
         checksum = Signal(n_checksum)
 
+        i = Signal(max=18)
+        self.sync.rio_phy += [
+            i.eq(i + 1),
+            If(i == 17,
+                i.eq(0)
+            ),
+            Array(self.dac + [self.mask[:16], self.mask[16:]])[i].eq(checksum)
+        ]
+
         body_ = Cat(self.cfg, adr, self.mask, self.dac)
         assert len(body_) == n_body
         body = Signal(n_body)
@@ -126,13 +135,13 @@ class Fastino(Module):
 
         self.sync.rtio += [
                 If(self.rtlink.o.stb,
-                    Array(self.serializer.dac + [
-                        self.serializer.mask[:16],
-                        self.serializer.mask[16:],
-                        self.serializer.cfg[:16],
-                        self.serializer.cfg[16:],
-                        Signal()
-                        ])[self.rtlink.o.address].eq(self.rtlink.o.data)
+                    #Array(self.serializer.dac + [
+                    #    self.serializer.mask[:16],
+                    #    self.serializer.mask[16:],
+                    #    self.serializer.cfg[:16],
+                    #    self.serializer.cfg[16:],
+                    #    Signal()
+                    #    ])[self.rtlink.o.address].eq(self.rtlink.o.data)
                 ),
                 self.rtlink.i.stb.eq(self.rtlink.o.stb &
                     (self.rtlink.o.address[4:] == 0b11)),
