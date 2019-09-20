@@ -74,7 +74,7 @@ class SerDes(Module):
             self.stb.eq(i_frame == n_div*n_frame//2 - 1),
 
             self.crc.last.eq(checksum),
-            self.crc.data.eq(ddr_data),
+            self.crc.data[::-1].eq(ddr_data),
         ]
         miso = Signal()
         miso_sr = Signal(n_frame, reset_less=True)
